@@ -23,6 +23,7 @@ from data_manager import (
     SCALE_STD, SCALE5_CODES, DIST_CODES, TEXT_CODES,
     POSITIVE_LEVELS, MIN_RESPONDENTS, options_of, normalize_pct,
 )
+from cross_sync import load_audience_all, clear_audience_cache
 
 # ══════════════════════════════════════════════════════════════
 #  데이터 연결
@@ -187,9 +188,19 @@ st.sidebar.divider()
 if dm.gsheet:
     st.sidebar.success("✅ 구글 시트 연결됨")
     if st.sidebar.button("🔄 구글 시트 새로고침"):
+        clear_audience_cache()
         reload_dm()
 else:
     st.sidebar.info("⚠ 로컬 모드 (시트 비연결)")
+
+# 관객통계 연동 상태
+_aud_data = load_audience_all()
+if _aud_data:
+    st.sidebar.success(f"🔗 관객통계 연동: {len(_aud_data)}회차")
+elif "audience_sheet_id" in st.secrets and st.secrets.get("audience_sheet_id"):
+    st.sidebar.warning("🔗 관객통계 연동 실패")
+else:
+    st.sidebar.caption("🔗 관객통계 미연동 (secrets)")
 
 st.sidebar.metric("등록 회차", f"{len(records)}회")
 st.sidebar.metric("총 응답자 수", f"{sum(r['응답자수'] for r in records):,}명")
@@ -213,6 +224,32 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ══════════════════════════════════════════════════════════════
 
 with tab1:
+    # ── 관객통계 연동 조회 (읽기 전용) ──
+    with st.expander("🔗 관객통계 연동 조회 (회차별)", expanded=False):
+        aud_data = load_audience_all()
+        cols_ref = st.columns([1, 3])
+        with cols_ref[0]:
+            ref_rnd = st.number_input("조회할 회차", min_value=1, max_value=99, value=1, step=1,
+                                       key="ref_aud_rnd")
+            if st.button("🔄 관객통계 새로고침", key="btn_aud_refresh"):
+                clear_audience_cache()
+                st.rerun()
+        with cols_ref[1]:
+            info = aud_data.get(int(ref_rnd))
+            if info is None:
+                if aud_data:
+                    st.warning(f"{int(ref_rnd)}회차 — 관객통계 미등록")
+                else:
+                    st.caption("관객통계 시트 비연동 또는 불러오기 실패")
+            else:
+                mc = st.columns(5)
+                mc[0].metric("공연일", info.get("공연일", "-") or "-")
+                mc[1].metric("출연단체", info.get("출연단체", "-") or "-")
+                mc[2].metric("장르", info.get("장르", "-") or "-")
+                mc[3].metric("공연관객수", f"{info.get('공연관객수', 0):,}")
+                mc[4].metric("체험참여수", f"{info.get('체험참여수', 0):,}")
+                st.caption("※ 읽기 전용 — 값은 관객통계 웹앱에서 수정하세요.")
+
     st.subheader("📥 네이버폼 CSV 불러오기")
     st.caption("컬럼이 Q1~Q22 순서여야 합니다. 중복 회차는 누적됩니다.")
     up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
