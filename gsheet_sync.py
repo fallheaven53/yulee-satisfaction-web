@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""만족도분석기 — 구글 시트 동기화"""
+"""만족도분석기 — 구글 시트 동기화 (22문항 스키마)"""
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -24,7 +24,7 @@ class SatisfactionSheetSync:
         self.gc = gspread.authorize(creds)
         self.sh = self.gc.open_by_key(spreadsheet_id)
 
-    def _ws(self, title, rows=500, cols=15):
+    def _ws(self, title, rows=1000, cols=10):
         try:
             return self.sh.worksheet(title)
         except gspread.WorksheetNotFound:
@@ -42,31 +42,24 @@ class SatisfactionSheetSync:
         ws1.clear()
         ws1.update(data1, value_input_option="RAW")
 
-        # 만족도 (long format)
-        ws2 = self._ws("만족도")
-        data2 = [["회차", "항목코드", "항목명", "매우그렇다", "그렇다",
-                  "보통", "그렇지않다", "매우그렇지않다"]]
-        for rnd in sorted(dm.satisfaction.keys()):
-            for q_code, vals in dm.satisfaction[rnd].items():
-                data2.append([
-                    rnd, q_code,
-                    dm.Q_LABELS.get(q_code, q_code),
-                    vals.get("매우그렇다", 0),
-                    vals.get("그렇다", 0),
-                    vals.get("보통", 0),
-                    vals.get("그렇지않다", 0),
-                    vals.get("매우그렇지않다", 0),
-                ])
+        # 응답분포 (long format)
+        ws2 = self._ws("응답분포")
+        data2 = [["회차", "Q코드", "보기", "값"]]
+        for rnd in sorted(dm.responses.keys()):
+            for q_code, dist in dm.responses[rnd].items():
+                for opt, val in dist.items():
+                    data2.append([rnd, q_code, opt, val])
         ws2.clear()
         ws2.update(data2, value_input_option="RAW")
 
-        # 인구통계 (long format)
-        ws3 = self._ws("인구통계")
-        data3 = [["회차", "카테고리", "항목", "비율"]]
-        for rnd in sorted(dm.demographics.keys()):
-            for cat, items in dm.demographics[rnd].items():
-                for item_name, ratio in items.items():
-                    data3.append([rnd, cat, item_name, ratio])
+        # 주관식 (long format)
+        ws3 = self._ws("주관식")
+        data3 = [["회차", "Q코드", "순번", "내용"]]
+        for rnd in sorted(dm.texts.keys()):
+            for q_code, texts in dm.texts[rnd].items():
+                for i, t in enumerate(texts, start=1):
+                    if t and str(t).strip():
+                        data3.append([rnd, q_code, i, str(t)])
         ws3.clear()
         ws3.update(data3, value_input_option="RAW")
 
@@ -77,9 +70,12 @@ class SatisfactionSheetSync:
             rows = ws1.get_all_values()
             dm.rounds = {}
             for row in rows[1:]:
-                if not row[0]:
+                if not row or not row[0]:
                     continue
-                rnd = int(row[0])
+                try:
+                    rnd = int(row[0])
+                except ValueError:
+                    continue
                 dm.rounds[rnd] = {
                     "공연일": row[1] if len(row) > 1 else "",
                     "출연단체": row[2] if len(row) > 2 else "",
@@ -90,44 +86,42 @@ class SatisfactionSheetSync:
         except Exception:
             pass
 
-        # 만족도
+        # 응답분포
         try:
-            ws2 = self.sh.worksheet("만족도")
+            ws2 = self.sh.worksheet("응답분포")
             rows = ws2.get_all_values()
-            dm.satisfaction = {}
+            dm.responses = {}
             for row in rows[1:]:
-                if not row[0] or len(row) < 8:
+                if not row or len(row) < 4 or not row[0]:
                     continue
-                rnd = int(row[0])
+                try:
+                    rnd = int(row[0])
+                except ValueError:
+                    continue
                 q_code = row[1]
-                if rnd not in dm.satisfaction:
-                    dm.satisfaction[rnd] = {}
-                dm.satisfaction[rnd][q_code] = {
-                    "매우그렇다": float(row[3]) if row[3] else 0,
-                    "그렇다": float(row[4]) if row[4] else 0,
-                    "보통": float(row[5]) if row[5] else 0,
-                    "그렇지않다": float(row[6]) if row[6] else 0,
-                    "매우그렇지않다": float(row[7]) if row[7] else 0,
-                }
+                opt = row[2]
+                try:
+                    val = float(row[3]) if row[3] else 0
+                except ValueError:
+                    val = 0
+                dm.responses.setdefault(rnd, {}).setdefault(q_code, {})[opt] = val
         except Exception:
             pass
 
-        # 인구통계
+        # 주관식
         try:
-            ws3 = self.sh.worksheet("인구통계")
+            ws3 = self.sh.worksheet("주관식")
             rows = ws3.get_all_values()
-            dm.demographics = {}
+            dm.texts = {}
             for row in rows[1:]:
-                if not row[0] or len(row) < 4:
+                if not row or len(row) < 4 or not row[0]:
                     continue
-                rnd = int(row[0])
-                cat = row[1]
-                item = row[2]
-                ratio = float(row[3]) if row[3] else 0
-                if rnd not in dm.demographics:
-                    dm.demographics[rnd] = {}
-                if cat not in dm.demographics[rnd]:
-                    dm.demographics[rnd][cat] = {}
-                dm.demographics[rnd][cat][item] = ratio
+                try:
+                    rnd = int(row[0])
+                except ValueError:
+                    continue
+                q_code = row[1]
+                content = row[3]
+                dm.texts.setdefault(rnd, {}).setdefault(q_code, []).append(content)
         except Exception:
             pass
