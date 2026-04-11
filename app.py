@@ -195,6 +195,23 @@ if dm.gsheet:
     if st.sidebar.button("🔄 구글 시트 새로고침"):
         clear_audience_cache()
         reload_dm()
+
+    with st.sidebar.expander("⚠ 시트 초기화", expanded=False):
+        st.caption("회차정보·응답분포·주관식 시트의 모든 데이터를 지웁니다. 되돌릴 수 없습니다.")
+        confirm = st.text_input("확인을 위해 '초기화'를 입력하세요", key="reset_confirm")
+        if st.button("🗑 전부 삭제", type="secondary", use_container_width=True):
+            if confirm == "초기화":
+                try:
+                    dm.gsheet.reset_all()
+                    dm.rounds = {}
+                    dm.responses = {}
+                    dm.texts = {}
+                    st.success("시트 초기화 완료")
+                    reload_dm()
+                except Exception as e:
+                    st.error(f"초기화 실패: {e}")
+            else:
+                st.warning("확인 문구가 일치하지 않습니다")
 else:
     st.sidebar.info("⚠ 로컬 모드 (시트 비연결)")
 

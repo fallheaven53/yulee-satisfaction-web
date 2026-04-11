@@ -30,6 +30,18 @@ class SatisfactionSheetSync:
         except gspread.WorksheetNotFound:
             return self.sh.add_worksheet(title, rows=rows, cols=cols)
 
+    def reset_all(self):
+        """회차정보·응답분포·주관식 시트의 데이터 전부 삭제 (헤더만 남김)"""
+        targets = [
+            ("회차정보", ["회차", "공연일", "출연단체", "장르", "응답자수", "보충여부"]),
+            ("응답분포", ["회차", "Q코드", "보기", "값"]),
+            ("주관식",   ["회차", "Q코드", "순번", "내용"]),
+        ]
+        for title, header in targets:
+            ws = self._ws(title)
+            ws.clear()
+            ws.update([header], value_input_option="RAW")
+
     def upload_all(self, dm):
         # 회차정보
         ws1 = self._ws("회차정보")
