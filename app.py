@@ -286,7 +286,7 @@ with tab1:
                 mc[0].metric("공연일", info.get("공연일", "-") or "-")
                 mc[1].metric("출연단체", info.get("출연단체", "-") or "-")
                 mc[2].metric("장르", info.get("장르", "-") or "-")
-                mc[3].metric("공연관객수", f"{info.get('공연관객수', 0):,}")
+                mc[3].metric("방문객수(공식)", f"{info.get('공연관객수', 0):,}")
                 mc[4].metric("체험참여수", f"{info.get('체험참여수', 0):,}")
                 st.caption("※ 읽기 전용 — 값은 관객통계 웹앱에서 수정하세요.")
 
