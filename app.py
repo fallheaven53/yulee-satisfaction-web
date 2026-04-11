@@ -104,6 +104,26 @@ def _read_csv(file_bytes):
     return None
 
 
+def _ko_only(val):
+    """'매우 그렇다 / Strongly agree / 非常同意' → '매우 그렇다'
+    첫 ' / '(공백 필수) 앞부분만 남기고, 선행 ? 기호·공백을 제거한다.
+    """
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(val)
+    # 영어·중국어 부분 제거: ' / ' (공백-슬래시-공백) 기준 첫 조각만
+    parts = re.split(r"\s+/\s+", s, maxsplit=1)
+    s = parts[0]
+    # 선행 ? 아티팩트 및 공백 정리
+    s = s.lstrip("?").strip()
+    return s
+
+
 def _extract_round(val):
     """'1회차', '제 1회차', '1' 등에서 정수 추출"""
     if pd.isna(val):
@@ -124,10 +144,10 @@ def parse_naver_csv(file_bytes):
         return {}
 
     cols = list(df.columns)
-    # 회차 컬럼(Q1 앵커) 탐색
+    # 회차 컬럼(Q1 앵커) 탐색 — 한국어만 추출한 헤더에서 '회차' 검색
     round_idx = None
     for i, c in enumerate(cols):
-        if "회차" in str(c):
+        if "회차" in _ko_only(c):
             round_idx = i
             break
     if round_idx is None:
@@ -150,10 +170,8 @@ def parse_naver_csv(file_bytes):
             q = Q_BY_CODE.get(q_code)
             if not q or q["type"] == "round":
                 continue
-            val = row[col]
-            if pd.isna(val):
-                continue
-            sval = str(val).strip()
+            # 한국어만 추출 ('매우 그렇다 / Strongly agree / 非常同意' → '매우 그렇다')
+            sval = _ko_only(row[col])
             if not sval:
                 continue
             if q["type"] in ("text", "free"):
