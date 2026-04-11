@@ -116,25 +116,30 @@ def _extract_round(val):
 def parse_naver_csv(file_bytes):
     """
     네이버폼 CSV → {회차: {"resp": {Q코드:{보기:카운트}}, "texts": {Q코드:[...]}, "n": 응답자수}}
-    컬럼은 응답시각/제출시각 외에 Q1~Q22 순서로 가정.
+    '회차' 키워드 포함 컬럼을 Q1 앵커로 삼아, 그 이후 컬럼을 Q2~Q22로 순서대로 매핑.
+    회차 앞쪽의 메타데이터(응답일시·참여자 번호 등)는 자동으로 무시됨.
     """
     df = _read_csv(file_bytes)
     if df is None or df.empty:
         return {}
 
-    # 컬럼에서 시각 관련 컬럼 제외, 나머지를 Q1~Q22 순으로 매핑
     cols = list(df.columns)
-    skip_pat = re.compile(r"(시각|시간|날짜|타임스탬프|일시|timestamp)", re.IGNORECASE)
-    q_cols = [c for c in cols if not skip_pat.search(str(c))]
-    # 22개 미만이어도 진행 (있는 만큼만)
-    q_cols = q_cols[:22]
+    # 회차 컬럼(Q1 앵커) 탐색
+    round_idx = None
+    for i, c in enumerate(cols):
+        if "회차" in str(c):
+            round_idx = i
+            break
+    if round_idx is None:
+        return {}  # 회차 컬럼 못 찾으면 포기
+
+    # 회차 컬럼부터 최대 22개를 Q1~Q22로 매핑
+    q_cols = cols[round_idx:round_idx + 22]
+    round_col = q_cols[0]
 
     result = {}
     for _, row in df.iterrows():
-        # Q1: 회차
-        if len(q_cols) < 1:
-            continue
-        rnd = _extract_round(row[q_cols[0]])
+        rnd = _extract_round(row[round_col])
         if rnd is None:
             continue
         bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
