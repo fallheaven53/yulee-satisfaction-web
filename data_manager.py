@@ -149,19 +149,20 @@ class SatisfactionManager:
 
     def calc_summary(self):
         records = self.get_round_records()
-        total_resp = sum(r["응답자수"] for r in records)
-        pos_rates = [r["긍정응답률(%)"] for r in records if r["긍정응답률(%)"] > 0]
+        active = [r for r in records if r["응답자수"] > 0]
+        total_resp = sum(r["응답자수"] for r in active)
+        pos_rates = [r["긍정응답률(%)"] for r in active if r["긍정응답률(%)"] > 0]
         avg_pos = round(sum(pos_rates) / len(pos_rates), 1) if pos_rates else 0
-        max_rec = max((r for r in records if r["긍정응답률(%)"] > 0),
+        max_rec = max((r for r in active if r["긍정응답률(%)"] > 0),
                       key=lambda x: x["긍정응답률(%)"], default=None)
-        min_rec = min((r for r in records if r["긍정응답률(%)"] > 0),
+        min_rec = min((r for r in active if r["긍정응답률(%)"] > 0),
                       key=lambda x: x["긍정응답률(%)"], default=None)
         return {
             "total_resp": total_resp,
             "avg_pos": avg_pos,
             "max_round": f"{max_rec['회차']}회차 ({max_rec['긍정응답률(%)']}%)" if max_rec else "-",
             "min_round": f"{min_rec['회차']}회차 ({min_rec['긍정응답률(%)']}%)" if min_rec else "-",
-            "total_rounds": len(records),
+            "total_rounds": len(active),
         }
 
     def calc_genre_positive(self):

@@ -51,7 +51,9 @@ def reload_dm():
 
 
 def load_target_dates():
-    """정산관리 구글 시트에서 출연단체·공연일 매핑"""
+    """정산관리 구글 시트에서 출연단체·공연일·장르 매핑
+    반환: {회차: (단체명, 공연일, 장르)}
+    """
     if "target_dates" in st.session_state:
         return st.session_state["target_dates"]
     result = {}
@@ -71,10 +73,16 @@ def load_target_dates():
         cur_year = str(datetime.now().year)
         ws1 = sh.worksheet("단체정보")
         rows = ws1.get_all_values()
+        hdr = [h.strip() for h in rows[0]] if rows else []
+        genre_idx = hdr.index("장르") if "장르" in hdr else -1
         id_to_name = {}
+        id_to_genre = {}
         for row in rows[1:]:
             if row[0] and row[1]:
-                id_to_name[row[0].strip()] = row[1].strip()
+                tid = row[0].strip()
+                id_to_name[tid] = row[1].strip()
+                if genre_idx >= 0 and len(row) > genre_idx and row[genre_idx]:
+                    id_to_genre[tid] = row[genre_idx].strip()
 
         ws2 = sh.worksheet("출연이력")
         rows2 = ws2.get_all_values()
@@ -82,10 +90,11 @@ def load_target_dates():
             if len(row) > 4 and row[2].strip() == cur_year:
                 tid = row[1].strip()
                 name = id_to_name.get(tid, "")
+                genre = id_to_genre.get(tid, "")
                 rnd_str = row[3].strip()
                 date_val = row[4].strip()
                 if name and date_val and rnd_str.isdigit():
-                    result[int(rnd_str)] = (name, date_val)
+                    result[int(rnd_str)] = (name, date_val, genre)
     except Exception:
         pass
     st.session_state["target_dates"] = result
@@ -167,7 +176,8 @@ def parse_naver_csv(file_bytes, target_dates=None):
                 date_col = c
                 break
         if date_col is not None:
-            for rnd, (_, date_val) in target_dates.items():
+            for rnd, vals in target_dates.items():
+                date_val = vals[1]
                 try:
                     d = pd.to_datetime(date_val).date()
                     perf_date_to_round[d] = rnd
@@ -349,13 +359,14 @@ with tab1:
                 dm.responses.clear()
                 dm.texts.clear()
                 for rnd, b in sorted(parsed.items()):
-                    info = dm.rounds.get(rnd, {}).copy()
+                    info = {}
                     if rnd in target_dates:
-                        name, date_val = target_dates[rnd]
-                        info.setdefault("출연단체", name)
-                        info.setdefault("공연일", date_val)
+                        name, date_val, genre = target_dates[rnd]
+                        info["출연단체"] = name
+                        info["공연일"] = date_val
+                        info["장르"] = genre
                     info["응답자수"] = b["n"]
-                    info.setdefault("장르", info.get("장르", ""))
+                    info.setdefault("장르", "")
                     dm.rounds[rnd] = info
                     dm.responses[rnd] = b["resp"]
                     dm.texts[rnd] = b["texts"]
@@ -371,34 +382,44 @@ with tab1:
 
     # ── 수동 입력 폼 ──
     st.subheader("✍ 수동 입력 / 수정")
-    edit_mode = "edit_target" in st.session_state and st.session_state["edit_target"] in dm.rounds
-    target_rnd = st.session_state.get("edit_target")
-    if edit_mode:
-        st.info(f"📝 {target_rnd}회차 수정 중")
-
     target_dates = load_target_dates()
-    base = dm.rounds.get(target_rnd, {}) if edit_mode else {}
-    base_resp = dm.responses.get(target_rnd, {}) if edit_mode else {}
-    base_texts = dm.texts.get(target_rnd, {}) if edit_mode else {}
+
+    form_rnd = st.number_input(
+        "회차 선택", min_value=1, max_value=99,
+        value=int(st.session_state.get("edit_target", 1)), step=1,
+        key="form_rnd_select",
+    )
+    is_existing_rnd = form_rnd in dm.rounds
+    if is_existing_rnd:
+        st.info(f"📝 {form_rnd}회차 기존 데이터 편집")
+    else:
+        st.caption(f"{form_rnd}회차 — 신규 입력")
+
+    base = dm.rounds.get(form_rnd, {})
+    base_resp = dm.responses.get(form_rnd, {})
+    base_texts = dm.texts.get(form_rnd, {})
+
+    auto_name, auto_date, auto_genre = "", "", ""
+    if form_rnd in target_dates:
+        auto_name, auto_date, auto_genre = target_dates[form_rnd]
 
     with st.form("manual_form", clear_on_submit=False):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            rnd_in = st.number_input("회차", min_value=1, max_value=99,
-                                      value=int(target_rnd) if edit_mode else 1, step=1)
-        # 회차 변경 시 자동 매핑
-        auto_name, auto_date = "", ""
-        if rnd_in in target_dates:
-            auto_name, auto_date = target_dates[rnd_in]
+        c2, c3, c4 = st.columns(3)
         with c2:
-            date_in = st.text_input("공연일", value=base.get("공연일") or auto_date)
+            date_in = st.text_input("공연일", value=base.get("공연일") or auto_date,
+                                     key=f"form_date_{form_rnd}")
         with c3:
-            name_in = st.text_input("출연단체", value=base.get("출연단체") or auto_name)
+            name_in = st.text_input("출연단체", value=base.get("출연단체") or auto_name,
+                                     key=f"form_name_{form_rnd}")
         with c4:
+            cur_genre = base.get("장르") or auto_genre
             genre_in = st.selectbox("장르", GENRES,
-                index=GENRES.index(base["장르"]) if base.get("장르") in GENRES else 0)
+                index=GENRES.index(cur_genre) if cur_genre in GENRES else 0,
+                key=f"form_genre_{form_rnd}")
 
-        n_in = st.number_input("응답자 수", min_value=0, value=int(base.get("응답자수", 0)), step=1)
+        n_in = st.number_input("응답자 수", min_value=0,
+                                value=int(base.get("응답자수", 0)),
+                                step=1, key=f"form_n_{form_rnd}")
 
         st.markdown("##### 만족도 분포 입력 (Q2~Q17)")
         st.caption("5점 척도(Q4~Q9, Q16~Q17)는 비율(%) 입력. 단일선택 문항은 응답 수 입력.")
@@ -415,7 +436,7 @@ with tab1:
                     with cols_in[i % len(cols_in)]:
                         v = st.number_input(opt, min_value=0.0, step=1.0,
                                             value=float(cur.get(opt, 0)),
-                                            key=f"{q['code']}_{opt}_{target_rnd or 'new'}")
+                                            key=f"{q['code']}_{opt}_{form_rnd}")
                         row_vals[opt] = v
                 if any(row_vals.values()):
                     new_resp[q["code"]] = row_vals
@@ -426,32 +447,30 @@ with tab1:
             q = Q_BY_CODE[q_code]
             existing = "\n".join(base_texts.get(q_code, []))
             txt = st.text_area(f"{q_code}. {q['label']}", value=existing,
-                               key=f"text_{q_code}_{target_rnd or 'new'}", height=80)
+                               key=f"text_{q_code}_{form_rnd}", height=80)
             if txt.strip():
                 text_inputs[q_code] = [line for line in txt.split("\n") if line.strip()]
 
-        c_btn1, c_btn2 = st.columns(2)
-        with c_btn1:
-            submitted = st.form_submit_button(
-                "💾 저장" if not edit_mode else "💾 수정 저장", type="primary", use_container_width=True)
-        with c_btn2:
-            cancel = st.form_submit_button("❌ 취소", use_container_width=True)
+        submitted = st.form_submit_button(
+            "💾 수정 저장" if is_existing_rnd else "💾 저장", type="primary", use_container_width=True)
 
     if submitted:
-        info = {
+        info = dict(dm.rounds.get(form_rnd, {}))
+        info.update({
             "공연일": date_in, "출연단체": name_in, "장르": genre_in,
-            "응답자수": int(n_in), "보충": dm.rounds.get(int(rnd_in), {}).get("보충", False),
-        }
-        dm.save_round_info(int(rnd_in), info)
-        if new_resp:
-            dm.save_responses(int(rnd_in), new_resp)
-        if text_inputs:
-            dm.save_texts(int(rnd_in), text_inputs)
+            "응답자수": int(n_in), "보충": info.get("보충", False),
+        })
+        dm.save_round_info(form_rnd, info)
+        merged_resp = dict(dm.responses.get(form_rnd, {}))
+        merged_resp.update(new_resp)
+        if merged_resp:
+            dm.save_responses(form_rnd, merged_resp)
+        merged_texts = dict(dm.texts.get(form_rnd, {}))
+        merged_texts.update(text_inputs)
+        if merged_texts:
+            dm.save_texts(form_rnd, merged_texts)
         st.session_state.pop("edit_target", None)
-        st.success(f"{int(rnd_in)}회차 저장 완료")
-        st.rerun()
-    if cancel and edit_mode:
-        st.session_state.pop("edit_target", None)
+        st.success(f"{form_rnd}회차 저장 완료")
         st.rerun()
 
     st.divider()
