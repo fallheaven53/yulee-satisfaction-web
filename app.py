@@ -105,8 +105,20 @@ def load_target_dates():
 #  네이버폼 CSV 파싱 (Q1~Q22)
 # ══════════════════════════════════════════════════════════════
 
+def _has_korean(df):
+    sample = " ".join(str(c) for c in df.columns) + " "
+    sample += " ".join(str(v) for v in df.iloc[0].values) if len(df) > 0 else ""
+    return bool(re.search(r"[가-힣]", sample))
+
 def _read_csv(file_bytes):
-    for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+    for enc in ("cp949", "utf-8-sig", "utf-8", "euc-kr"):
+        try:
+            df = pd.read_csv(BytesIO(file_bytes), encoding=enc)
+            if df is not None and not df.empty and _has_korean(df):
+                return df
+        except Exception:
+            continue
+    for enc in ("cp949", "utf-8-sig", "utf-8", "euc-kr"):
         try:
             return pd.read_csv(BytesIO(file_bytes), encoding=enc)
         except Exception:
@@ -338,12 +350,19 @@ with tab1:
     st.caption("컬럼이 Q1~Q22 순서여야 합니다. 중복 회차는 누적됩니다.")
     up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
     if up is not None:
+        file_bytes = up.getvalue()
+        csv_df = _read_csv(file_bytes)
+        csv_total_rows = len(csv_df) - 0 if csv_df is not None else 0
         target_dates = load_target_dates()
-        parsed = parse_naver_csv(up.getvalue(), target_dates=target_dates)
+        parsed = parse_naver_csv(file_bytes, target_dates=target_dates)
         if not parsed:
             st.error("회차(Q1)를 인식하지 못했습니다. CSV 형식을 확인해주세요.")
         else:
-            st.success(f"파싱 완료: {len(parsed)}개 회차, 총 {sum(b['n'] for b in parsed.values())}건 응답")
+            parsed_total = sum(b["n"] for b in parsed.values())
+            st.success(f"파싱 완료: {len(parsed)}개 회차, 총 {parsed_total}건 응답")
+            if csv_total_rows > 0 and parsed_total < csv_total_rows:
+                st.warning(f"⚠ CSV 원본 {csv_total_rows}행 중 {csv_total_rows - parsed_total}행이 파싱되지 않았습니다. "
+                           f"인코딩 문제 또는 회차(Q1) 미입력 응답일 수 있습니다.")
             if target_dates:
                 st.caption("※ 공연일 기준 날짜 필터링 적용됨")
             preview = pd.DataFrame([{
