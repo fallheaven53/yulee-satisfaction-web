@@ -24,6 +24,7 @@ from data_manager import (
     POSITIVE_LEVELS, MIN_RESPONDENTS, options_of, normalize_pct,
 )
 from cross_sync import load_audience_all, clear_audience_cache
+from address_db import normalize_address, classify_distance, DISTANCE_BUCKETS
 
 # ══════════════════════════════════════════════════════════════
 #  데이터 연결
@@ -133,11 +134,11 @@ def _extract_round(val):
     return int(m.group(1)) if m else None
 
 
-def parse_naver_csv(file_bytes):
+def parse_naver_csv(file_bytes, target_dates=None):
     """
     네이버폼 CSV → {회차: {"resp": {Q코드:{보기:카운트}}, "texts": {Q코드:[...]}, "n": 응답자수}}
     '회차' 키워드 포함 컬럼을 Q1 앵커로 삼아, 그 이후 컬럼을 Q2~Q22로 순서대로 매핑.
-    회차 앞쪽의 메타데이터(응답일시·참여자 번호 등)는 자동으로 무시됨.
+    target_dates가 주어지면 응답일시 기준으로 공연일 날짜 응답만 필터링.
     """
     df = _read_csv(file_bytes)
     if df is None or df.empty:
@@ -157,11 +158,38 @@ def parse_naver_csv(file_bytes):
     q_cols = cols[round_idx:round_idx + 22]
     round_col = q_cols[0]
 
+    # 날짜 필터링: 공연일 → 회차 역매핑
+    date_col = None
+    perf_date_to_round = {}
+    if target_dates:
+        for c in cols:
+            if "응답일시" in str(c) or "일시" in str(c):
+                date_col = c
+                break
+        if date_col is not None:
+            for rnd, (_, date_val) in target_dates.items():
+                try:
+                    d = pd.to_datetime(date_val).date()
+                    perf_date_to_round[d] = rnd
+                except Exception:
+                    pass
+
     result = {}
     for _, row in df.iterrows():
         rnd = _extract_round(row[round_col])
         if rnd is None:
             continue
+
+        # 날짜 필터링: 응답일이 공연일과 일치하는 응답만 포함
+        if date_col is not None and perf_date_to_round:
+            try:
+                resp_date = pd.to_datetime(row[date_col]).date()
+            except Exception:
+                continue
+            if resp_date not in perf_date_to_round:
+                continue
+            rnd = perf_date_to_round[resp_date]
+
         bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
         bucket["n"] += 1
 
@@ -175,7 +203,12 @@ def parse_naver_csv(file_bytes):
             if not sval:
                 continue
             if q["type"] in ("text", "free"):
-                bucket["texts"].setdefault(q_code, []).append(sval)
+                if q_code == "Q20":
+                    norm, _dist = normalize_address(sval)
+                    if norm:
+                        bucket["texts"].setdefault(q_code, []).append(norm)
+                else:
+                    bucket["texts"].setdefault(q_code, []).append(sval)
             else:
                 # 단일선택 / scale5
                 opts = options_of(q_code)
@@ -242,8 +275,9 @@ elif "audience_sheet_id" in st.secrets and st.secrets.get("audience_sheet_id"):
 else:
     st.sidebar.caption("🔗 관객통계 미연동 (secrets)")
 
-st.sidebar.metric("등록 회차", f"{len(records)}회")
-st.sidebar.metric("총 응답자 수", f"{sum(r['응답자수'] for r in records):,}명")
+active_records = [r for r in records if r["응답자수"] > 0]
+st.sidebar.metric("등록 회차", f"{len(active_records)}회")
+st.sidebar.metric("총 응답자 수", f"{sum(r['응답자수'] for r in active_records):,}명")
 
 insuf = dm.insufficient_rounds()
 if insuf:
@@ -294,11 +328,14 @@ with tab1:
     st.caption("컬럼이 Q1~Q22 순서여야 합니다. 중복 회차는 누적됩니다.")
     up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
     if up is not None:
-        parsed = parse_naver_csv(up.getvalue())
+        target_dates = load_target_dates()
+        parsed = parse_naver_csv(up.getvalue(), target_dates=target_dates)
         if not parsed:
             st.error("회차(Q1)를 인식하지 못했습니다. CSV 형식을 확인해주세요.")
         else:
             st.success(f"파싱 완료: {len(parsed)}개 회차, 총 {sum(b['n'] for b in parsed.values())}건 응답")
+            if target_dates:
+                st.caption("※ 공연일 기준 날짜 필터링 적용됨")
             preview = pd.DataFrame([{
                 "회차": rnd, "응답자수": b["n"],
                 "분포 문항 수": len(b["resp"]),
@@ -306,9 +343,12 @@ with tab1:
             } for rnd, b in sorted(parsed.items())])
             st.dataframe(preview, use_container_width=True, hide_index=True)
 
-            target_dates = load_target_dates()
             if st.button("💾 모든 회차 저장 (분포 + 주관식)", type="primary"):
-                for rnd, b in parsed.items():
+                # CSV는 누적본이므로 기존 데이터를 전면 교체
+                dm.rounds.clear()
+                dm.responses.clear()
+                dm.texts.clear()
+                for rnd, b in sorted(parsed.items()):
                     info = dm.rounds.get(rnd, {}).copy()
                     if rnd in target_dates:
                         name, date_val = target_dates[rnd]
@@ -320,8 +360,12 @@ with tab1:
                     dm.responses[rnd] = b["resp"]
                     dm.texts[rnd] = b["texts"]
                 dm._sync()
+                st.session_state.pop("edit_target", None)
+                for key in list(st.session_state.keys()):
+                    if key.startswith(("Q", "text_Q")):
+                        del st.session_state[key]
                 st.success("저장 완료")
-                st.rerun()
+                reload_dm()
 
     st.divider()
 
@@ -479,14 +523,14 @@ with tab2:
                     with cols_in[i % len(cols_in)]:
                         v = st.number_input(opt, min_value=0.0, step=1.0,
                                             value=float(cur.get(opt, 0)),
-                                            key=f"demo_{q_code}_{opt}")
+                                            key=f"demo_{q_code}_{opt}_{sel_rnd}")
                         row_vals[opt] = v
                 if any(row_vals.values()):
                     new_resp_demo[q_code] = row_vals
 
             st.markdown("**Q20. 거주 주소 (줄바꿈으로 구분)**")
             existing = "\n".join(cur_texts.get("Q20", []))
-            q20_text = st.text_area("거주 주소 목록", value=existing, height=120, key="demo_q20")
+            q20_text = st.text_area("거주 주소 목록", value=existing, height=120, key=f"demo_q20_{sel_rnd}")
 
             if st.form_submit_button("💾 인구통계 저장", type="primary"):
                 merged_resp = dict(cur_resp)
@@ -494,7 +538,15 @@ with tab2:
                 dm.save_responses(sel_rnd, merged_resp)
                 merged_texts = dict(cur_texts)
                 if q20_text.strip():
-                    merged_texts["Q20"] = [line for line in q20_text.split("\n") if line.strip()]
+                    norm_lines = []
+                    for line in q20_text.split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        nv, _d = normalize_address(line)
+                        if nv:
+                            norm_lines.append(nv)
+                    merged_texts["Q20"] = norm_lines
                 else:
                     merged_texts.pop("Q20", None)
                 dm.save_texts(sel_rnd, merged_texts)
@@ -608,6 +660,44 @@ with tab3:
                 fig = px.bar(df_b, x="보기", y="비율(%)", template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
 
+        st.divider()
+        st.subheader("🚗 Q20. 거주지 → 전통문화관 이동 거리 분포")
+        addr_all = dm.collect_texts("Q20")
+        if addr_all:
+            dist_list = []
+            for _rnd, text in addr_all:
+                _n, d = normalize_address(text)
+                if d is not None:
+                    dist_list.append(d)
+            if dist_list:
+                bucket_counts = {label: 0 for label, _, _ in DISTANCE_BUCKETS}
+                for d in dist_list:
+                    lb = classify_distance(d)
+                    if lb:
+                        bucket_counts[lb] += 1
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("매칭 응답 수", f"{len(dist_list):,}명")
+                mc2.metric("평균 이동 거리", f"{round(sum(dist_list)/len(dist_list), 1)} km")
+                mc3.metric("미매칭", f"{len(addr_all) - len(dist_list):,}명")
+                col_dl, col_dr = st.columns(2)
+                df_dist = pd.DataFrame({
+                    "구간": list(bucket_counts.keys()),
+                    "응답수": list(bucket_counts.values()),
+                })
+                with col_dl:
+                    fig = px.pie(df_dist, values="응답수", names="구간",
+                                 template="plotly_dark", hole=0.4)
+                    st.plotly_chart(fig, use_container_width=True)
+                with col_dr:
+                    fig = px.bar(df_dist, x="구간", y="응답수",
+                                 template="plotly_dark")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption("거리 매핑 가능한 주소가 없습니다.")
+        else:
+            st.caption("Q20 거주 주소 데이터가 없습니다.")
+
+        st.divider()
         st.subheader("Q19. 연령대")
         d = dm.aggregate_dist("Q19")
         if d:
@@ -672,10 +762,19 @@ with tab4:
                         pd.DataFrame(texts, columns=["회차", "내용"]).to_excel(
                             writer, sheet_name=f"{q_code}_{Q_BY_CODE[q_code]['label']}", index=False)
 
-                # Q20 거주주소
+                # Q20 거주주소 (+ 거리 매핑)
                 addr = dm.collect_texts("Q20")
                 if addr:
-                    pd.DataFrame(addr, columns=["회차", "주소"]).to_excel(
+                    addr_rows = []
+                    for rnd, text in addr:
+                        norm, dist = normalize_address(text)
+                        addr_rows.append({
+                            "회차": rnd,
+                            "주소": norm or text,
+                            "거리(km)": dist if dist is not None else "",
+                            "거리구간": classify_distance(dist) or "",
+                        })
+                    pd.DataFrame(addr_rows).to_excel(
                         writer, sheet_name="Q20_거주주소", index=False)
 
             buf.seek(0)
