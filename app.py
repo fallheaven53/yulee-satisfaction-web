@@ -155,65 +155,100 @@ def _extract_round(val):
     return int(m.group(1)) if m else None
 
 
+def _build_date_ranges(target_dates):
+    """공연일 목록 → {회차: (시작일, 종료일)} 범위 생성
+    첫 회차: 아주 이른 날짜 ~ 다음 공연일 전날 (공연 전 응답도 포함)
+    중간 회차: 이전 공연일 다음날 ~ 다음 공연일 전날  (아니라, 해당 공연일 ~ 다음 공연일 전날)
+    마지막 회차: 공연일 ~ +7일
+    실제: 첫 회차 시작은 제한 없음, 각 회차 경계는 다음 공연일
+    """
+    from datetime import timedelta, date as date_cls
+    sorted_rnds = sorted(target_dates.keys())
+    ranges = {}
+    for i, rnd in enumerate(sorted_rnds):
+        vals = target_dates[rnd]
+        try:
+            perf_date = pd.to_datetime(vals[1]).date()
+        except Exception:
+            continue
+        if i == 0:
+            start = date_cls(2000, 1, 1)
+        else:
+            start = perf_date
+        if i + 1 < len(sorted_rnds):
+            next_vals = target_dates[sorted_rnds[i + 1]]
+            try:
+                end = pd.to_datetime(next_vals[1]).date() - timedelta(days=1)
+            except Exception:
+                end = perf_date + timedelta(days=7)
+        else:
+            end = perf_date + timedelta(days=7)
+        ranges[rnd] = (start, end)
+    return ranges
+
+
+def _date_to_round(resp_date, date_ranges):
+    for rnd, (start, end) in date_ranges.items():
+        if start <= resp_date <= end:
+            return rnd
+    return None
+
+
 def parse_naver_csv(file_bytes, target_dates=None):
     """
     네이버폼 CSV → {회차: {"resp": {Q코드:{보기:카운트}}, "texts": {Q코드:[...]}, "n": 응답자수}}
-    '회차' 키워드 포함 컬럼을 Q1 앵커로 삼아, 그 이후 컬럼을 Q2~Q22로 순서대로 매핑.
-    target_dates가 주어지면 응답일시 기준으로 공연일 날짜 응답만 필터링.
+    '_stats': {"total": CSV행수, "parsed": 파싱성공, "filtered_out": 날짜필터제외}
     """
     df = _read_csv(file_bytes)
     if df is None or df.empty:
         return {}
 
     cols = list(df.columns)
-    # 회차 컬럼(Q1 앵커) 탐색 — 한국어만 추출한 헤더에서 '회차' 검색
     round_idx = None
     for i, c in enumerate(cols):
         if "회차" in _ko_only(c):
             round_idx = i
             break
     if round_idx is None:
-        return {}  # 회차 컬럼 못 찾으면 포기
+        return {}
 
-    # 회차 컬럼부터 최대 22개를 Q1~Q22로 매핑
     q_cols = cols[round_idx:round_idx + 22]
     round_col = q_cols[0]
 
-    # 날짜 필터링: 공연일 → 회차 역매핑
     date_col = None
-    perf_date_to_round = {}
+    date_ranges = {}
     if target_dates:
         for c in cols:
             if "응답일시" in str(c) or "일시" in str(c):
                 date_col = c
                 break
         if date_col is not None:
-            for rnd, vals in target_dates.items():
-                date_val = vals[1]
-                try:
-                    d = pd.to_datetime(date_val).date()
-                    perf_date_to_round[d] = rnd
-                except Exception:
-                    pass
+            date_ranges = _build_date_ranges(target_dates)
 
     result = {}
+    stats = {"total": len(df), "parsed": 0, "filtered_out": 0, "no_round": 0}
+
     for _, row in df.iterrows():
         rnd = _extract_round(row[round_col])
         if rnd is None:
+            stats["no_round"] += 1
             continue
 
-        # 날짜 필터링: 응답일이 공연일과 일치하는 응답만 포함
-        if date_col is not None and perf_date_to_round:
+        if date_col is not None and date_ranges:
             try:
                 resp_date = pd.to_datetime(row[date_col]).date()
             except Exception:
+                stats["filtered_out"] += 1
                 continue
-            if resp_date not in perf_date_to_round:
+            matched_rnd = _date_to_round(resp_date, date_ranges)
+            if matched_rnd is None:
+                stats["filtered_out"] += 1
                 continue
-            rnd = perf_date_to_round[resp_date]
+            rnd = matched_rnd
 
         bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
         bucket["n"] += 1
+        stats["parsed"] += 1
 
         for idx, col in enumerate(q_cols):
             q_code = f"Q{idx + 1}"
@@ -249,6 +284,7 @@ def parse_naver_csv(file_bytes, target_dates=None):
                     matched = sval  # 매칭 실패는 원문 그대로
                 d = bucket["resp"].setdefault(q_code, {opt: 0 for opt in opts})
                 d[matched] = d.get(matched, 0) + 1
+    result["_stats"] = stats
     return result
 
 
@@ -351,20 +387,24 @@ with tab1:
     up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
     if up is not None:
         file_bytes = up.getvalue()
-        csv_df = _read_csv(file_bytes)
-        csv_total_rows = len(csv_df) - 0 if csv_df is not None else 0
         target_dates = load_target_dates()
         parsed = parse_naver_csv(file_bytes, target_dates=target_dates)
-        if not parsed:
+        if not parsed or (len(parsed) == 1 and "_stats" in parsed):
             st.error("회차(Q1)를 인식하지 못했습니다. CSV 형식을 확인해주세요.")
         else:
+            stats = parsed.pop("_stats", {})
             parsed_total = sum(b["n"] for b in parsed.values())
             st.success(f"파싱 완료: {len(parsed)}개 회차, 총 {parsed_total}건 응답")
-            if csv_total_rows > 0 and parsed_total < csv_total_rows:
-                st.warning(f"⚠ CSV 원본 {csv_total_rows}행 중 {csv_total_rows - parsed_total}행이 파싱되지 않았습니다. "
-                           f"인코딩 문제 또는 회차(Q1) 미입력 응답일 수 있습니다.")
+            if stats:
+                parts = []
+                if stats.get("filtered_out"):
+                    parts.append(f"날짜 필터링 제외 {stats['filtered_out']}건")
+                if stats.get("no_round"):
+                    parts.append(f"회차 미인식 {stats['no_round']}건")
+                if parts:
+                    st.caption(f"※ 원본 {stats.get('total', 0)}행 중 {parsed_total}건 포함 ({', '.join(parts)})")
             if target_dates:
-                st.caption("※ 공연일 기준 날짜 필터링 적용됨")
+                st.caption("※ 공연일 기준 날짜 범위 필터링 적용됨 (공연일 ~ 다음 공연일 전날)")
             preview = pd.DataFrame([{
                 "회차": rnd, "응답자수": b["n"],
                 "분포 문항 수": len(b["resp"]),
@@ -392,7 +432,7 @@ with tab1:
                 dm._sync()
                 st.session_state.pop("edit_target", None)
                 for key in list(st.session_state.keys()):
-                    if key.startswith(("Q", "text_Q")):
+                    if key.startswith(("Q", "text_Q", "form_", "demo_")):
                         del st.session_state[key]
                 st.success("저장 완료")
                 reload_dm()
