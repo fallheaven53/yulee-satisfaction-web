@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-율이공방 — 만족도분석기 웹앱 (네이버폼 22문항)
+율이공방 — 만족도분석기 웹앱 (19문항)
 2026 토요상설공연 만족도조사 등록·분석
 """
 
@@ -102,8 +102,14 @@ def load_target_dates():
 
 
 # ══════════════════════════════════════════════════════════════
-#  네이버폼 CSV 파싱 (Q1~Q22)
+#  CSV 파싱 (구글폼/네이버폼 호환)
 # ══════════════════════════════════════════════════════════════
+
+_NEW_CSV_QCODES = [
+    "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8",
+    "Q10", "Q11", "Q13", "Q14", "Q15", "Q17",
+    "Q18", "Q19", "Q20", "Q21", "Q22",
+]
 
 def _has_korean(df):
     sample = " ".join(str(c) for c in df.columns) + " "
@@ -196,62 +202,85 @@ def _date_to_round(resp_date, date_ranges):
 
 def parse_naver_csv(file_bytes, target_dates=None):
     """
-    네이버폼 CSV → {회차: {"resp": {Q코드:{보기:카운트}}, "texts": {Q코드:[...]}, "n": 응답자수}}
+    CSV → {회차: {"resp": {Q코드:{보기:카운트}}, "texts": {Q코드:[...]}, "n": 응답자수}}
     '_stats': {"total": CSV행수, "parsed": 파싱성공, "filtered_out": 날짜필터제외}
+    구글폼(Q1 삭제 후) / 네이버폼(Q1 있는 기존) 모두 호환
     """
     df = _read_csv(file_bytes)
     if df is None or df.empty:
         return {}
 
     cols = list(df.columns)
+
+    # Q1("회차") 컬럼 탐색 — 있으면 기존 22컬럼 포맷
     round_idx = None
     for i, c in enumerate(cols):
         if "회차" in _ko_only(c):
             round_idx = i
             break
-    if round_idx is None:
-        return {}
 
-    q_cols = cols[round_idx:round_idx + 22]
-    round_col = q_cols[0]
+    if round_idx is not None:
+        q_cols = cols[round_idx:round_idx + 22]
+        q_code_list = [f"Q{i + 1}" for i in range(22)]
+        round_col = q_cols[0]
+        use_q1 = True
+    else:
+        # Q1 없는 새 포맷: "방문" 키워드로 Q2 시작 위치 탐색
+        q2_idx = None
+        for i, c in enumerate(cols):
+            c_ko = _ko_only(c)
+            if "방문" in c_ko or "몇 번째" in c_ko or "몇번째" in c_ko:
+                q2_idx = i
+                break
+        if q2_idx is None:
+            return {}
+        q_cols = cols[q2_idx:q2_idx + len(_NEW_CSV_QCODES)]
+        q_code_list = list(_NEW_CSV_QCODES)
+        round_col = None
+        use_q1 = False
 
+    # 날짜 기반 회차 매핑 (타임스탬프 컬럼 탐색)
     date_col = None
     date_ranges = {}
-    if target_dates:
-        for c in cols:
-            if "응답일시" in str(c) or "일시" in str(c):
-                date_col = c
-                break
-        if date_col is not None:
-            date_ranges = _build_date_ranges(target_dates)
+    for c in cols:
+        c_str = str(c).lower()
+        if any(kw in c_str for kw in ["응답일시", "일시", "타임스탬프", "timestamp"]):
+            date_col = c
+            break
+    if target_dates and date_col is not None:
+        date_ranges = _build_date_ranges(target_dates)
 
     result = {}
     stats = {"total": len(df), "parsed": 0, "filtered_out": 0, "no_round": 0}
 
     for _, row in df.iterrows():
-        rnd = _extract_round(row[round_col])
-        if rnd is None:
-            stats["no_round"] += 1
-            continue
+        rnd = None
 
+        if use_q1:
+            rnd = _extract_round(row[round_col])
+
+        # 날짜 기반 매핑 (Q1 없을 때 필수, 있을 때는 보정용)
         if date_col is not None and date_ranges:
             try:
                 resp_date = pd.to_datetime(row[date_col]).date()
+                matched_rnd = _date_to_round(resp_date, date_ranges)
+                if matched_rnd is not None:
+                    rnd = matched_rnd
             except Exception:
-                stats["filtered_out"] += 1
-                continue
-            matched_rnd = _date_to_round(resp_date, date_ranges)
-            if matched_rnd is None:
-                stats["filtered_out"] += 1
-                continue
-            rnd = matched_rnd
+                pass
+
+        if rnd is None:
+            stats["no_round"] += 1
+            continue
 
         bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
         bucket["n"] += 1
         stats["parsed"] += 1
 
         for idx, col in enumerate(q_cols):
-            q_code = f"Q{idx + 1}"
+            if idx >= len(q_code_list):
+                break
+            q_code = q_code_list[idx]
             q = Q_BY_CODE.get(q_code)
             if not q or q["type"] == "round":
                 continue
@@ -342,7 +371,7 @@ if insuf:
     st.sidebar.warning(f"⚠ 기준치({MIN_RESPONDENTS}명) 미달: {len(insuf)}회차")
 
 st.title("📋 만족도 분석기")
-st.caption(f"네이버폼 22문항 기준 · 오늘 {datetime.now().strftime('%Y-%m-%d')}")
+st.caption(f"19문항 기준 · 오늘 {datetime.now().strftime('%Y-%m-%d')}")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "① 만족도 입력·관리",
@@ -382,15 +411,15 @@ with tab1:
                 mc[4].metric("체험참여수", f"{info.get('체험참여수', 0):,}")
                 st.caption("※ 읽기 전용 — 값은 관객통계 웹앱에서 수정하세요.")
 
-    st.subheader("📥 네이버폼 CSV 불러오기")
-    st.caption("컬럼이 Q1~Q22 순서여야 합니다. 중복 회차는 누적됩니다.")
+    st.subheader("📥 CSV 불러오기")
+    st.caption("구글폼/네이버폼 CSV 모두 지원. 중복 회차는 누적됩니다.")
     up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
     if up is not None:
         file_bytes = up.getvalue()
         target_dates = load_target_dates()
         parsed = parse_naver_csv(file_bytes, target_dates=target_dates)
         if not parsed or (len(parsed) == 1 and "_stats" in parsed):
-            st.error("회차(Q1)를 인식하지 못했습니다. CSV 형식을 확인해주세요.")
+            st.error("문항 컬럼을 인식하지 못했습니다. CSV 형식을 확인해주세요.")
         else:
             stats = parsed.pop("_stats", {})
             parsed_total = sum(b["n"] for b in parsed.values())
@@ -480,8 +509,8 @@ with tab1:
                                 value=int(base.get("응답자수", 0)),
                                 step=1, key=f"form_n_{form_rnd}")
 
-        st.markdown("##### 만족도 분포 입력 (Q2~Q17)")
-        st.caption("5점 척도(Q4~Q9, Q16~Q17)는 비율(%) 입력. 단일선택 문항은 응답 수 입력.")
+        st.markdown("##### 만족도 분포 입력")
+        st.caption("5점 척도(Q4~Q8, Q17)는 비율(%) 입력. 단일선택 문항은 응답 수 입력.")
         new_resp = {}
         for q in QUESTIONS:
             if q["type"] == "round" or q["code"] in TEXT_CODES:
@@ -640,17 +669,17 @@ with tab3:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("등록 회차", f"{summary['total_rounds']}회")
     c2.metric("총 응답자 수", f"{summary['total_resp']:,}명")
-    c3.metric("평균 긍정률(Q4~Q9)", f"{summary['avg_pos']}%")
+    c3.metric("평균 긍정률(Q4~Q8)", f"{summary['avg_pos']}%")
     c4.metric("최고 회차", summary["max_round"])
 
     if not records:
         st.info("등록된 데이터가 없습니다.")
     else:
         st.divider()
-        st.subheader("📈 만족도 6개 문항(Q4~Q9) 긍정응답률 추이")
-        scale6_codes = ["Q4", "Q5", "Q6", "Q7", "Q8", "Q9"]
+        st.subheader("📈 만족도 5개 문항(Q4~Q8) 긍정응답률 추이")
+        scale5_codes = ["Q4", "Q5", "Q6", "Q7", "Q8"]
         rows = []
-        for q_code in scale6_codes:
+        for q_code in scale5_codes:
             for rnd, pos in dm.positive_trend(q_code):
                 rows.append({"회차": rnd, "문항": f"{q_code}.{Q_BY_CODE[q_code]['label']}", "긍정률(%)": pos})
         if rows:
@@ -659,21 +688,20 @@ with tab3:
                           template="plotly_dark")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.caption("Q4~Q9 데이터가 없습니다.")
+            st.caption("Q4~Q8 데이터가 없습니다.")
 
         st.divider()
-        st.subheader("🔁 재참여 의향(Q16) · 추천 의향(Q17) 추이")
+        st.subheader("🔁 추천 의향(Q17) 추이")
         rows2 = []
-        for q_code in ["Q16", "Q17"]:
-            for rnd, pos in dm.positive_trend(q_code):
-                rows2.append({"회차": rnd, "문항": f"{q_code}.{Q_BY_CODE[q_code]['label']}", "긍정률(%)": pos})
+        for rnd, pos in dm.positive_trend("Q17"):
+            rows2.append({"회차": rnd, "긍정률(%)": pos})
         if rows2:
             df_t2 = pd.DataFrame(rows2)
-            fig2 = px.line(df_t2, x="회차", y="긍정률(%)", color="문항", markers=True,
+            fig2 = px.line(df_t2, x="회차", y="긍정률(%)", markers=True,
                            template="plotly_dark")
             st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.caption("Q16~Q17 데이터가 없습니다.")
+            st.caption("Q17 데이터가 없습니다.")
 
         st.divider()
         col_l, col_r = st.columns(2)
@@ -710,9 +738,9 @@ with tab3:
         else:
             st.caption("데이터 없음")
 
-        # Q11~Q13 변형 척도
-        st.subheader("Q11~Q13. 자막 도움도 · QR 편의성 · 디지털 안내")
-        for q_code in ["Q11", "Q12", "Q13"]:
+        # Q11, Q13 변형 척도
+        st.subheader("Q11, Q13. 자막 도움도 · 디지털 안내")
+        for q_code in ["Q11", "Q13"]:
             d = dm.aggregate_dist(q_code)
             if d:
                 df_b = pd.DataFrame({"보기": list(d.keys()), "비율(%)": list(d.values())})
@@ -784,7 +812,7 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
-        st.subheader("🎭 장르별 평균 긍정률(Q4~Q9)")
+        st.subheader("🎭 장르별 평균 긍정률(Q4~Q8)")
         gd = dm.calc_genre_positive()
         if gd:
             df_g = pd.DataFrame({"장르": list(gd.keys()), "긍정률(%)": list(gd.values())})
@@ -823,7 +851,7 @@ with tab4:
                 if dist_rows:
                     pd.DataFrame(dist_rows).to_excel(writer, sheet_name="응답분포", index=False)
 
-                # 긍정률 요약 (Q4~Q9, Q16~Q17)
+                # 긍정률 요약 (Q4~Q8, Q17)
                 pos_rows = []
                 for rnd in sorted(dm.rounds.keys()):
                     row = {"회차": rnd}
@@ -868,7 +896,7 @@ with tab4:
         summary = dm.calc_summary()
         st.write(f"- **등록 회차**: {summary['total_rounds']}회")
         st.write(f"- **총 응답자**: {summary['total_resp']:,}명")
-        st.write(f"- **평균 긍정률(Q4~Q9)**: {summary['avg_pos']}%")
+        st.write(f"- **평균 긍정률(Q4~Q8)**: {summary['avg_pos']}%")
         st.write(f"- **최고 만족 회차**: {summary['max_round']}")
         st.write(f"- **최저 만족 회차**: {summary['min_round']}")
         if insuf:

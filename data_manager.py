@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""만족도분석기 웹앱 — 데이터 매니저 (네이버폼 22문항)"""
+"""만족도분석기 웹앱 — 데이터 매니저 (19문항)"""
 
 GENRES = ["판소리·산조", "국악창작", "연희·무용", "무형유산"]
 
 # ── 5점 척도 표준 ──
 SCALE_STD = ["매우 그렇다", "그렇다", "보통", "그렇지 않다", "매우 그렇지 않다"]
 
-# ── 22문항 정의 (네이버폼 순서) ──
+# ── 19문항 정의 (Q1·Q9·Q12·Q16 삭제) ──
 QUESTIONS = [
     {"code": "Q1",  "label": "관람 회차",          "type": "round"},
     {"code": "Q2",  "label": "방문 횟수",          "type": "single",
@@ -19,14 +19,11 @@ QUESTIONS = [
     {"code": "Q6",  "label": "공연 감동",          "type": "scale5"},
     {"code": "Q7",  "label": "시간·구성 적절성",   "type": "scale5"},
     {"code": "Q8",  "label": "관계자 친절도",      "type": "scale5"},
-    {"code": "Q9",  "label": "시작·소요시간 적절성", "type": "scale5"},
     {"code": "Q10", "label": "불편사항",           "type": "single",
      "options": ["없었다", "좌석이 불편했다", "안내가 부족했다", "접근이 불편했다", "기타"]},
     {"code": "Q11", "label": "자막·해설 도움도",   "type": "single",
      "options": ["매우 도움이 되었다", "도움이 되었다", "보통이다",
                  "도움이 되지 않았다", "보지 못했다"]},
-    {"code": "Q12", "label": "QR 편의성",          "type": "single",
-     "options": ["매우 편리했다", "편리했다", "보통이다", "불편했다", "이용하지 않았다"]},
     {"code": "Q13", "label": "디지털 안내 반응",   "type": "single",
      "options": ["매우 좋다", "좋다", "보통이다", "글씨가 더 크면 좋겠다", "찾기 어려웠다"]},
     {"code": "Q14", "label": "교통수단",           "type": "single",
@@ -34,7 +31,6 @@ QUESTIONS = [
     {"code": "Q15", "label": "친환경 인식",        "type": "single",
      "options": ["매우 중요하다", "어느 정도 고려한다", "보통이다",
                  "별로 고려하지 않는다", "전혀 고려하지 않는다"]},
-    {"code": "Q16", "label": "재참여 의향",        "type": "scale5"},
     {"code": "Q17", "label": "추천 의향",          "type": "scale5"},
     {"code": "Q18", "label": "성별",               "type": "single",
      "options": ["남성", "여성"]},
@@ -127,8 +123,8 @@ class SatisfactionManager:
         return round(sum(pct.get(lv, 0) for lv in POSITIVE_LEVELS), 1)
 
     def round_overall_positive(self, rnd):
-        """회차의 5점 척도 6개 문항(Q4~Q9) 평균 긍정률"""
-        rates = [self.positive_rate(rnd, c) for c in ["Q4","Q5","Q6","Q7","Q8","Q9"]
+        """회차의 5점 척도 문항(Q4~Q8) 평균 긍정률"""
+        rates = [self.positive_rate(rnd, c) for c in ["Q4","Q5","Q6","Q7","Q8"]
                  if self.responses.get(rnd, {}).get(c)]
         return round(sum(rates) / len(rates), 1) if rates else 0.0
 
@@ -166,7 +162,7 @@ class SatisfactionManager:
         }
 
     def calc_genre_positive(self):
-        """장르별 평균 긍정응답률(Q4~Q9)"""
+        """장르별 평균 긍정응답률(Q4~Q8)"""
         result = {}
         for rnd in self.rounds:
             genre = self.rounds[rnd].get("장르", "")

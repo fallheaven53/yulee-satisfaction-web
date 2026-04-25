@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""만족도분석기 — 구글 시트 동기화 (22문항 스키마)"""
+"""만족도분석기 — 구글 시트 동기화 (19문항 스키마)"""
 
 import gspread
 from google.oauth2.service_account import Credentials
