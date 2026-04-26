@@ -8,7 +8,6 @@ import re
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
 from io import BytesIO
 
@@ -18,13 +17,17 @@ st.set_page_config(
     layout="wide",
 )
 
-from data_manager import (
-    SatisfactionManager, GENRES, QUESTIONS, Q_BY_CODE,
-    SCALE_STD, SCALE5_CODES, DIST_CODES, TEXT_CODES,
-    POSITIVE_LEVELS, MIN_RESPONDENTS, options_of, normalize_pct,
-)
-from cross_sync import load_audience_all, clear_audience_cache
-from address_db import normalize_address, classify_distance, DISTANCE_BUCKETS
+try:
+    from data_manager import (
+        SatisfactionManager, GENRES, QUESTIONS, Q_BY_CODE,
+        SCALE_STD, SCALE5_CODES, DIST_CODES, TEXT_CODES,
+        POSITIVE_LEVELS, MIN_RESPONDENTS, options_of, normalize_pct,
+    )
+    from cross_sync import load_audience_all, clear_audience_cache
+    from address_db import normalize_address, classify_distance, DISTANCE_BUCKETS
+except Exception as _import_err:
+    st.error(f"모듈 임포트 실패: {_import_err}")
+    st.stop()
 
 # ══════════════════════════════════════════════════════════════
 #  데이터 연결
@@ -321,8 +324,13 @@ def parse_naver_csv(file_bytes, target_dates=None):
 #  사이드바
 # ══════════════════════════════════════════════════════════════
 
-dm = get_dm()
-records = dm.get_round_records()
+try:
+    dm = get_dm()
+    records = dm.get_round_records()
+except Exception as _dm_err:
+    st.error(f"데이터 초기화 실패: {_dm_err}")
+    dm = SatisfactionManager(gsheet_sync=None)
+    records = []
 
 st.sidebar.title("📋 만족도분석기")
 st.sidebar.caption("2026 토요상설공연")
@@ -354,7 +362,10 @@ else:
     st.sidebar.info("⚠ 로컬 모드 (시트 비연결)")
 
 # 관객통계 연동 상태
-_aud_data = load_audience_all()
+try:
+    _aud_data = load_audience_all()
+except Exception:
+    _aud_data = {}
 if _aud_data:
     st.sidebar.success(f"🔗 관객통계 연동: {len(_aud_data)}회차")
 elif "audience_sheet_id" in st.secrets and st.secrets.get("audience_sheet_id"):
