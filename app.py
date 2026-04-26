@@ -53,9 +53,32 @@ def reload_dm():
     st.rerun()
 
 
+# 토요상설공연 시즌 일정 (정산관리 시트 미연동 시 fallback용)
+# 2026 시즌: 4-11 개막, 매주 토요일, 20회차
+_SEASON_OPENING = {2026: (4, 11)}
+_SEASON_ROUNDS = 20
+
+
+def _fallback_target_dates():
+    """secrets 미설정·시트 읽기 실패 시 사용할 기본 공연일정.
+    회차별 단체명·장르는 비어 있으나, 응답일자 기반 회차 매핑은 가능."""
+    from datetime import date as date_cls, timedelta
+    cur_year = datetime.now().year
+    if cur_year not in _SEASON_OPENING:
+        return {}
+    m, d = _SEASON_OPENING[cur_year]
+    opening = date_cls(cur_year, m, d)
+    result = {}
+    for rnd in range(1, _SEASON_ROUNDS + 1):
+        perf = opening + timedelta(days=(rnd - 1) * 7)
+        result[rnd] = ("", perf.strftime("%Y-%m-%d"), "")
+    return result
+
+
 def load_target_dates():
     """정산관리 구글 시트에서 출연단체·공연일·장르 매핑
     반환: {회차: (단체명, 공연일, 장르)}
+    실패 시 시즌 기본 일정 fallback 사용
     """
     if "target_dates" in st.session_state:
         return st.session_state["target_dates"]
@@ -64,9 +87,9 @@ def load_target_dates():
         import gspread
         from google.oauth2.service_account import Credentials
         if "gcp_service_account" not in st.secrets:
-            return result
+            raise RuntimeError("gcp_service_account 미설정")
         if "settlement_spreadsheet_id" not in st.secrets or not st.secrets["settlement_spreadsheet_id"]:
-            return result
+            raise RuntimeError("settlement_spreadsheet_id 미설정")
         creds = Credentials.from_service_account_info(
             dict(st.secrets["gcp_service_account"]),
             scopes=["https://www.googleapis.com/auth/spreadsheets"])
@@ -100,6 +123,13 @@ def load_target_dates():
                     result[int(rnd_str)] = (name, date_val, genre)
     except Exception:
         pass
+
+    # 정산관리 시트 결과가 비어있으면 시즌 일정 fallback 사용
+    if not result:
+        result = _fallback_target_dates()
+        st.session_state["_target_dates_fallback"] = True
+    else:
+        st.session_state["_target_dates_fallback"] = False
     st.session_state["target_dates"] = result
     return result
 
@@ -324,30 +354,72 @@ def parse_naver_csv(file_bytes, target_dates=None):
 #  구글폼 응답 시트 직접 불러오기
 # ══════════════════════════════════════════════════════════════
 
-GFORM_COL_MAP = [
-    None,        # 타임스탬프 (별도 처리)
-    None,        # 언어 선택 (스킵)
-    "Q1",        # 관람하신 공연 회차
-    "Q2",        # 방문 횟수
-    "Q3",        # 정보 습득 경로
-    "Q4",        # 전반적 만족
-    "Q5",        # 공연 재미
-    "Q6",        # 공연 감동
-    "Q7",        # 시간·구성 적절성
-    "Q8",        # 관계자 친절도
-    "Q10",       # 불편사항
-    "Q11",       # 자막·해설 도움도
-    "Q13",       # 디지털 안내 반응
-    "Q14",       # 교통수단
-    "Q15",       # 친환경 인식
-    "Q17",       # 추천 의향
-    "Q18",       # 성별
-    "Q19",       # 연령대
-    "Q20a",      # 거주 지역 (구/군)
-    "Q20b",      # 거주 지역 (동/읍/면 상세)
-    "Q21",       # 좋았던 점
-    "Q22",       # 건의사항
+# 헤더 텍스트의 키워드로 Q코드 매핑. 더 구체적인 키워드부터 우선 매칭.
+# 시트 컬럼 순서·개수가 어떻게 변해도 19문항만 골라 읽도록 한다.
+GFORM_KEYWORDS = [
+    ("Q1",  ["회차"]),
+    ("Q4",  ["전반"]),
+    ("Q5",  ["재미"]),
+    ("Q6",  ["감동"]),
+    ("Q7",  ["시간", "구성"]),
+    ("Q8",  ["친절"]),
+    ("Q11", ["자막", "해설"]),
+    ("Q13", ["디지털"]),
+    ("Q14", ["교통"]),
+    ("Q15", ["친환경"]),
+    ("Q17", ["추천"]),
+    ("Q18", ["성별"]),
+    ("Q19", ["연령"]),
+    ("Q21", ["좋았", "좋은 점"]),
+    ("Q22", ["건의", "개선"]),
+    ("Q3",  ["정보"]),
+    ("Q10", ["불편"]),
+    ("Q2",  ["방문", "몇 번째", "몇번째"]),
 ]
+
+
+def _parse_resp_date(s):
+    """구글폼 타임스탬프에서 날짜만 추출.
+    '2026. 4. 25. 오후 4:03:13' 같은 한국어 시간 표기는 무시하고 YYYY. M. D 부분만 잡는다."""
+    if not s:
+        return None
+    text = str(s).strip()
+    m = re.search(r"(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})", text)
+    if m:
+        try:
+            from datetime import date as date_cls
+            return date_cls(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except Exception:
+            pass
+    try:
+        return pd.to_datetime(text).date()
+    except Exception:
+        return None
+
+
+def _build_gform_col_map(header):
+    """헤더 한 행에서 Q코드 → 컬럼 인덱스 매핑 생성.
+    Q20(거주 주소)은 '거주'·'주소'·'지역' 키워드가 들어간 모든 컬럼을 모아 별도 반환."""
+    col_map = {}
+    used = set()
+    for q_code, kws in GFORM_KEYWORDS:
+        for idx, h in enumerate(header):
+            if idx in used:
+                continue
+            h_str = str(h or "")
+            if any(kw in h_str for kw in kws):
+                col_map[q_code] = idx
+                used.add(idx)
+                break
+    q20_cols = []
+    for idx, h in enumerate(header):
+        if idx in used:
+            continue
+        h_str = str(h or "")
+        if "거주" in h_str or "주소" in h_str or "지역" in h_str:
+            q20_cols.append(idx)
+            used.add(idx)
+    return col_map, q20_cols
 
 
 def _fetch_gform_sheet():
@@ -369,7 +441,9 @@ def parse_google_form(rows, target_dates=None):
     if not rows or len(rows) < 2:
         return {}
 
+    header = rows[0]
     data_rows = rows[1:]
+    col_map, q20_cols = _build_gform_col_map(header)
 
     date_ranges = {}
     if target_dates:
@@ -393,17 +467,14 @@ def parse_google_form(rows, target_dates=None):
 
     result = {}
     stats = {"total": len(data_rows), "parsed": 0, "no_round": 0}
+    q1_idx = col_map.get("Q1")
     for row in data_rows:
         if not row or not row[0].strip():
             continue
 
-        resp_date = None
-        try:
-            resp_date = pd.to_datetime(row[0]).date()
-        except Exception:
-            pass
+        resp_date = _parse_resp_date(row[0])
 
-        q1_val = row[2].strip() if len(row) > 2 else ""
+        q1_val = row[q1_idx].strip() if q1_idx is not None and q1_idx < len(row) else ""
         q1_rnd = _extract_round(q1_val)
 
         # 날짜 우선 매핑: 응답일자가 공연일 범위에 들어가면 그 회차로 확정
@@ -427,22 +498,26 @@ def parse_google_form(rows, target_dates=None):
         bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
         bucket["n"] += 1
 
-        for col_idx, q_code in enumerate(GFORM_COL_MAP):
-            if q_code is None or col_idx >= len(row):
+        # Q20 거주 주소: 매칭된 모든 컬럼 값을 합쳐 단일 텍스트로
+        if q20_cols:
+            parts = []
+            for idx in q20_cols:
+                if idx < len(row):
+                    v = str(row[idx] or "").strip()
+                    if v:
+                        parts.append(v)
+            if parts:
+                combined = " ".join(parts)
+                norm, _dist = normalize_address(combined)
+                bucket["texts"].setdefault("Q20", []).append(norm if norm else combined)
+
+        for q_code, col_idx in col_map.items():
+            if q_code == "Q1":
+                continue  # 회차 매핑에 사용, 별도 저장 안 함
+            if col_idx >= len(row):
                 continue
             sval = _ko_only(row[col_idx])
             if not sval:
-                continue
-
-            if q_code == "Q20b":
-                continue
-            if q_code == "Q20a":
-                addr_a = row[21].strip() if len(row) > 21 else ""
-                addr_b = row[22].strip() if len(row) > 22 else ""
-                combined = f"{addr_a} {addr_b}".strip()
-                if combined:
-                    norm, _dist = normalize_address(combined)
-                    bucket["texts"].setdefault("Q20", []).append(norm if norm else combined)
                 continue
 
             q = Q_BY_CODE.get(q_code)
@@ -600,8 +675,8 @@ with tab1:
                             st.success(f"불러오기 완료: {len(parsed)}개 회차, 총 {parsed_total}건 응답")
                             if stats and stats.get("no_round"):
                                 st.caption(f"※ 원본 {stats.get('total', 0)}행 중 {parsed_total}건 매핑 (회차 미인식 {stats['no_round']}건 제외)")
-                            if not td:
-                                st.warning("⚠ 출연이력 시트 미연동 — 응답일자 기반 회차 매핑이 작동하지 않습니다. settlement_spreadsheet_id 확인 필요.")
+                            if st.session_state.get("_target_dates_fallback"):
+                                st.info("ℹ 출연이력 시트 미연동 — 시즌 기본 일정(개막 후 매주 토요일, 20회차)으로 매핑 중. 정확한 단체명·장르 표시를 위해 settlement_spreadsheet_id 등록 권장.")
                 except Exception as e:
                     st.error(f"구글폼 시트 연결 실패: {e}")
 
