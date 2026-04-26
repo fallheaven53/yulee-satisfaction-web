@@ -392,6 +392,7 @@ def parse_google_form(rows, target_dates=None):
             date_ranges[r] = (start, end)
 
     result = {}
+    stats = {"total": len(data_rows), "parsed": 0, "no_round": 0}
     for row in data_rows:
         if not row or not row[0].strip():
             continue
@@ -403,18 +404,25 @@ def parse_google_form(rows, target_dates=None):
             pass
 
         q1_val = row[2].strip() if len(row) > 2 else ""
-        rnd = _extract_round(q1_val)
-        if rnd is None:
-            continue
+        q1_rnd = _extract_round(q1_val)
 
+        # 날짜 우선 매핑: 응답일자가 공연일 범위에 들어가면 그 회차로 확정
+        # (Q1을 잘못 선택한 응답도 날짜로 보정)
+        rnd = None
         if date_ranges and resp_date:
-            matched_rnd = None
             for dr, (s, e) in date_ranges.items():
                 if s <= resp_date <= e:
-                    matched_rnd = dr
+                    rnd = dr
                     break
-            if matched_rnd is not None:
-                rnd = matched_rnd
+
+        # 날짜 매핑 실패 시 Q1 응답값을 폴백으로 사용
+        if rnd is None:
+            rnd = q1_rnd
+
+        if rnd is None:
+            stats["no_round"] += 1
+            continue
+        stats["parsed"] += 1
 
         bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
         bucket["n"] += 1
@@ -460,6 +468,7 @@ def parse_google_form(rows, target_dates=None):
                 d = bucket["resp"].setdefault(q_code, {opt: 0 for opt in opts})
                 d[matched] = d.get(matched, 0) + 1
 
+    result["_stats"] = stats
     return result
 
 
@@ -579,12 +588,20 @@ with tab1:
                     else:
                         td = load_target_dates()
                         parsed = parse_google_form(gform_rows, target_dates=td)
+                        stats = parsed.pop("_stats", {})
                         if not parsed:
-                            st.error("회차(Q1)를 인식하지 못했습니다.")
+                            st.error("회차를 인식하지 못했습니다. 출연이력 시트(공연일 매핑) 등록 여부를 확인하세요.")
+                            if stats:
+                                st.caption(f"※ 원본 {stats.get('total', 0)}행 중 회차 미인식 {stats.get('no_round', 0)}건")
                         else:
                             st.session_state["_gform_parsed"] = parsed
                             st.session_state["_gform_td"] = td
-                            st.success(f"불러오기 완료: {len(parsed)}개 회차, 총 {sum(b['n'] for b in parsed.values())}건 응답")
+                            parsed_total = sum(b['n'] for b in parsed.values())
+                            st.success(f"불러오기 완료: {len(parsed)}개 회차, 총 {parsed_total}건 응답")
+                            if stats and stats.get("no_round"):
+                                st.caption(f"※ 원본 {stats.get('total', 0)}행 중 {parsed_total}건 매핑 (회차 미인식 {stats['no_round']}건 제외)")
+                            if not td:
+                                st.warning("⚠ 출연이력 시트 미연동 — 응답일자 기반 회차 매핑이 작동하지 않습니다. settlement_spreadsheet_id 확인 필요.")
                 except Exception as e:
                     st.error(f"구글폼 시트 연결 실패: {e}")
 
