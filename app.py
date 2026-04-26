@@ -321,6 +321,149 @@ def parse_naver_csv(file_bytes, target_dates=None):
 
 
 # ══════════════════════════════════════════════════════════════
+#  구글폼 응답 시트 직접 불러오기
+# ══════════════════════════════════════════════════════════════
+
+GFORM_COL_MAP = [
+    None,        # 타임스탬프 (별도 처리)
+    None,        # 언어 선택 (스킵)
+    "Q1",        # 관람하신 공연 회차
+    "Q2",        # 방문 횟수
+    "Q3",        # 정보 습득 경로
+    "Q4",        # 전반적 만족
+    "Q5",        # 공연 재미
+    "Q6",        # 공연 감동
+    "Q7",        # 시간·구성 적절성
+    "Q8",        # 관계자 친절도
+    "Q10",       # 불편사항
+    "Q11",       # 자막·해설 도움도
+    "Q13",       # 디지털 안내 반응
+    "Q14",       # 교통수단
+    "Q15",       # 친환경 인식
+    "Q17",       # 추천 의향
+    "Q18",       # 성별
+    "Q19",       # 연령대
+    "Q20a",      # 거주 지역 (구/군)
+    "Q20b",      # 거주 지역 (동/읍/면 상세)
+    "Q21",       # 좋았던 점
+    "Q22",       # 건의사항
+]
+
+
+def _fetch_gform_sheet():
+    sheet_id = st.secrets.get("gform_response_sheet_id", "")
+    if not sheet_id or "gcp_service_account" not in st.secrets:
+        return None
+    import gspread
+    from google.oauth2.service_account import Credentials
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(sheet_id)
+    ws = sh.sheet1
+    return ws.get_all_values()
+
+
+def parse_google_form(rows, target_dates=None):
+    if not rows or len(rows) < 2:
+        return {}
+
+    data_rows = rows[1:]
+
+    date_ranges = {}
+    if target_dates:
+        from datetime import timedelta, date as date_cls
+        sorted_rnds = sorted(target_dates.keys())
+        for idx_r, r in enumerate(sorted_rnds):
+            vals = target_dates[r]
+            try:
+                perf_date = pd.to_datetime(vals[1]).date()
+            except Exception:
+                continue
+            start = date_cls(2000, 1, 1) if idx_r == 0 else perf_date
+            if idx_r + 1 < len(sorted_rnds):
+                try:
+                    end = pd.to_datetime(target_dates[sorted_rnds[idx_r + 1]][1]).date() - timedelta(days=1)
+                except Exception:
+                    end = perf_date + timedelta(days=7)
+            else:
+                end = perf_date + timedelta(days=7)
+            date_ranges[r] = (start, end)
+
+    result = {}
+    for row in data_rows:
+        if not row or not row[0].strip():
+            continue
+
+        resp_date = None
+        try:
+            resp_date = pd.to_datetime(row[0]).date()
+        except Exception:
+            pass
+
+        q1_val = row[2].strip() if len(row) > 2 else ""
+        rnd = _extract_round(q1_val)
+        if rnd is None:
+            continue
+
+        if date_ranges and resp_date:
+            matched_rnd = None
+            for dr, (s, e) in date_ranges.items():
+                if s <= resp_date <= e:
+                    matched_rnd = dr
+                    break
+            if matched_rnd is not None:
+                rnd = matched_rnd
+
+        bucket = result.setdefault(rnd, {"resp": {}, "texts": {}, "n": 0})
+        bucket["n"] += 1
+
+        for col_idx, q_code in enumerate(GFORM_COL_MAP):
+            if q_code is None or col_idx >= len(row):
+                continue
+            sval = _ko_only(row[col_idx])
+            if not sval:
+                continue
+
+            if q_code == "Q20b":
+                continue
+            if q_code == "Q20a":
+                addr_a = row[21].strip() if len(row) > 21 else ""
+                addr_b = row[22].strip() if len(row) > 22 else ""
+                combined = f"{addr_a} {addr_b}".strip()
+                if combined:
+                    norm, _dist = normalize_address(combined)
+                    bucket["texts"].setdefault("Q20", []).append(norm if norm else combined)
+                continue
+
+            q = Q_BY_CODE.get(q_code)
+            if not q or q["type"] == "round":
+                continue
+
+            if q["type"] in ("text", "free"):
+                bucket["texts"].setdefault(q_code, []).append(sval)
+            else:
+                opts = options_of(q_code)
+                matched = None
+                for opt in opts:
+                    if sval == opt:
+                        matched = opt
+                        break
+                if matched is None:
+                    for opt in opts:
+                        if opt in sval or sval in opt:
+                            matched = opt
+                            break
+                if matched is None:
+                    matched = sval
+                d = bucket["resp"].setdefault(q_code, {opt: 0 for opt in opts})
+                d[matched] = d.get(matched, 0) + 1
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
 #  사이드바
 # ══════════════════════════════════════════════════════════════
 
@@ -422,60 +565,118 @@ with tab1:
                 mc[4].metric("체험참여수", f"{info.get('체험참여수', 0):,}")
                 st.caption("※ 읽기 전용 — 값은 관객통계 웹앱에서 수정하세요.")
 
-    st.subheader("📥 CSV 불러오기")
-    st.caption("구글폼/네이버폼 CSV 모두 지원. 중복 회차는 누적됩니다.")
-    up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
-    if up is not None:
-        file_bytes = up.getvalue()
-        target_dates = load_target_dates()
-        parsed = parse_naver_csv(file_bytes, target_dates=target_dates)
-        if not parsed or (len(parsed) == 1 and "_stats" in parsed):
-            st.error("문항 컬럼을 인식하지 못했습니다. CSV 형식을 확인해주세요.")
-        else:
-            stats = parsed.pop("_stats", {})
-            parsed_total = sum(b["n"] for b in parsed.values())
-            st.success(f"파싱 완료: {len(parsed)}개 회차, 총 {parsed_total}건 응답")
-            if stats:
-                parts = []
-                if stats.get("filtered_out"):
-                    parts.append(f"날짜 필터링 제외 {stats['filtered_out']}건")
-                if stats.get("no_round"):
-                    parts.append(f"회차 미인식 {stats['no_round']}건")
-                if parts:
-                    st.caption(f"※ 원본 {stats.get('total', 0)}행 중 {parsed_total}건 포함 ({', '.join(parts)})")
-            if target_dates:
-                st.caption("※ 공연일 기준 날짜 범위 필터링 적용됨 (공연일 ~ 다음 공연일 전날)")
-            preview = pd.DataFrame([{
-                "회차": rnd, "응답자수": b["n"],
-                "분포 문항 수": len(b["resp"]),
-                "주관식 응답 수": sum(len(v) for v in b["texts"].values()),
-            } for rnd, b in sorted(parsed.items())])
-            st.dataframe(preview, use_container_width=True, hide_index=True)
+    st.subheader("📥 구글폼 응답 불러오기")
+    gform_sheet_id = st.secrets.get("gform_response_sheet_id", "")
+    if not gform_sheet_id:
+        st.warning("구글폼 응답 시트 미설정 (secrets에 gform_response_sheet_id 추가 필요)")
+    else:
+        if st.button("🔄 구글폼 응답 불러오기", type="primary", key="gform_load"):
+            with st.spinner("구글폼 응답 시트에서 데이터를 가져오는 중..."):
+                try:
+                    gform_rows = _fetch_gform_sheet()
+                    if not gform_rows or len(gform_rows) < 2:
+                        st.warning("응답 데이터가 없습니다.")
+                    else:
+                        td = load_target_dates()
+                        parsed = parse_google_form(gform_rows, target_dates=td)
+                        if not parsed:
+                            st.error("회차(Q1)를 인식하지 못했습니다.")
+                        else:
+                            st.session_state["_gform_parsed"] = parsed
+                            st.session_state["_gform_td"] = td
+                            st.success(f"불러오기 완료: {len(parsed)}개 회차, 총 {sum(b['n'] for b in parsed.values())}건 응답")
+                except Exception as e:
+                    st.error(f"구글폼 시트 연결 실패: {e}")
 
-            if st.button("💾 모든 회차 저장 (분포 + 주관식)", type="primary"):
-                # CSV는 누적본이므로 기존 데이터를 전면 교체
+        if "_gform_parsed" in st.session_state:
+            parsed = st.session_state["_gform_parsed"]
+            td = st.session_state.get("_gform_td", {})
+            if td:
+                st.caption("※ 공연일 기준 날짜 필터링 적용됨")
+            preview = pd.DataFrame([{"회차": r, "응답자수": b["n"],
+                "분포 문항 수": len(b["resp"]),
+                "주관식 응답 수": sum(len(v) for v in b["texts"].values())}
+                for r, b in sorted(parsed.items())])
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+            if st.button("💾 모든 회차 저장 (분포 + 주관식)", type="primary", key="gform_save"):
                 dm.rounds.clear()
                 dm.responses.clear()
                 dm.texts.clear()
-                for rnd, b in sorted(parsed.items()):
+                for r, b in sorted(parsed.items()):
                     info = {}
-                    if rnd in target_dates:
-                        name, date_val, genre = target_dates[rnd]
+                    if r in td:
+                        name, date_val, genre = td[r]
                         info["출연단체"] = name
                         info["공연일"] = date_val
                         info["장르"] = genre
                     info["응답자수"] = b["n"]
                     info.setdefault("장르", "")
-                    dm.rounds[rnd] = info
-                    dm.responses[rnd] = b["resp"]
-                    dm.texts[rnd] = b["texts"]
+                    dm.rounds[r] = info
+                    dm.responses[r] = b["resp"]
+                    dm.texts[r] = b["texts"]
                 dm._sync()
+                st.session_state.pop("_gform_parsed", None)
+                st.session_state.pop("_gform_td", None)
                 st.session_state.pop("edit_target", None)
                 for key in list(st.session_state.keys()):
                     if key.startswith(("Q", "text_Q", "form_", "demo_")):
                         del st.session_state[key]
                 st.success("저장 완료")
                 reload_dm()
+
+    with st.expander("📎 수동 업로드 (CSV)", expanded=False):
+        st.caption("구글폼/네이버폼 CSV 백업 업로드. 중복 회차는 전면 교체됩니다.")
+        up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
+        if up is not None:
+            file_bytes = up.getvalue()
+            target_dates = load_target_dates()
+            parsed = parse_naver_csv(file_bytes, target_dates=target_dates)
+            if not parsed or (len(parsed) == 1 and "_stats" in parsed):
+                st.error("문항 컬럼을 인식하지 못했습니다. CSV 형식을 확인해주세요.")
+            else:
+                stats = parsed.pop("_stats", {})
+                parsed_total = sum(b["n"] for b in parsed.values())
+                st.success(f"파싱 완료: {len(parsed)}개 회차, 총 {parsed_total}건 응답")
+                if stats:
+                    parts = []
+                    if stats.get("filtered_out"):
+                        parts.append(f"날짜 필터링 제외 {stats['filtered_out']}건")
+                    if stats.get("no_round"):
+                        parts.append(f"회차 미인식 {stats['no_round']}건")
+                    if parts:
+                        st.caption(f"※ 원본 {stats.get('total', 0)}행 중 {parsed_total}건 포함 ({', '.join(parts)})")
+                if target_dates:
+                    st.caption("※ 공연일 기준 날짜 범위 필터링 적용됨 (공연일 ~ 다음 공연일 전날)")
+                preview = pd.DataFrame([{
+                    "회차": rnd, "응답자수": b["n"],
+                    "분포 문항 수": len(b["resp"]),
+                    "주관식 응답 수": sum(len(v) for v in b["texts"].values()),
+                } for rnd, b in sorted(parsed.items())])
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+
+                if st.button("💾 모든 회차 저장 (분포 + 주관식)", type="primary", key="csv_save"):
+                    dm.rounds.clear()
+                    dm.responses.clear()
+                    dm.texts.clear()
+                    for rnd, b in sorted(parsed.items()):
+                        info = {}
+                        if rnd in target_dates:
+                            name, date_val, genre = target_dates[rnd]
+                            info["출연단체"] = name
+                            info["공연일"] = date_val
+                            info["장르"] = genre
+                        info["응답자수"] = b["n"]
+                        info.setdefault("장르", "")
+                        dm.rounds[rnd] = info
+                        dm.responses[rnd] = b["resp"]
+                        dm.texts[rnd] = b["texts"]
+                    dm._sync()
+                    st.session_state.pop("edit_target", None)
+                    for key in list(st.session_state.keys()):
+                        if key.startswith(("Q", "text_Q", "form_", "demo_")):
+                            del st.session_state[key]
+                    st.success("저장 완료")
+                    reload_dm()
 
     st.divider()
 
