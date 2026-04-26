@@ -690,10 +690,8 @@ with tab1:
                 "주관식 응답 수": sum(len(v) for v in b["texts"].values())}
                 for r, b in sorted(parsed.items())])
             st.dataframe(preview, use_container_width=True, hide_index=True)
-            if st.button("💾 모든 회차 저장 (분포 + 주관식)", type="primary", key="gform_save"):
-                dm.rounds.clear()
-                dm.responses.clear()
-                dm.texts.clear()
+            st.caption("※ 같은 회차는 덮어쓰기, 다른 회차 데이터는 보존됩니다.")
+            if st.button("💾 회차별 누적 저장 (분포 + 주관식)", type="primary", key="gform_save"):
                 for r, b in sorted(parsed.items()):
                     info = {}
                     if r in td:
@@ -717,7 +715,7 @@ with tab1:
                 reload_dm()
 
     with st.expander("📎 수동 업로드 (CSV)", expanded=False):
-        st.caption("구글폼/네이버폼 CSV 백업 업로드. 중복 회차는 전면 교체됩니다.")
+        st.caption("구글폼/네이버폼 CSV 백업 업로드. 1·2회차 네이버폼(22문항) 누적 등록에 사용.")
         up = st.file_uploader("CSV 파일", type=["csv"], key="csv_upload")
         if up is not None:
             file_bytes = up.getvalue()
@@ -746,10 +744,8 @@ with tab1:
                 } for rnd, b in sorted(parsed.items())])
                 st.dataframe(preview, use_container_width=True, hide_index=True)
 
-                if st.button("💾 모든 회차 저장 (분포 + 주관식)", type="primary", key="csv_save"):
-                    dm.rounds.clear()
-                    dm.responses.clear()
-                    dm.texts.clear()
+                st.caption("※ 같은 회차는 덮어쓰기, 다른 회차 데이터는 보존됩니다.")
+                if st.button("💾 회차별 누적 저장 (분포 + 주관식)", type="primary", key="csv_save"):
                     for rnd, b in sorted(parsed.items()):
                         info = {}
                         if rnd in target_dates:
