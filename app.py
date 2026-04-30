@@ -210,10 +210,7 @@ def _build_date_ranges(target_dates):
             perf_date = pd.to_datetime(vals[1]).date()
         except Exception:
             continue
-        if i == 0:
-            start = date_cls(2000, 1, 1)
-        else:
-            start = perf_date
+        start = perf_date
         if i + 1 < len(sorted_rnds):
             next_vals = target_dates[sorted_rnds[i + 1]]
             try:
@@ -455,7 +452,7 @@ def parse_google_form(rows, target_dates=None):
                 perf_date = pd.to_datetime(vals[1]).date()
             except Exception:
                 continue
-            start = date_cls(2000, 1, 1) if idx_r == 0 else perf_date
+            start = perf_date
             if idx_r + 1 < len(sorted_rnds):
                 try:
                     end = pd.to_datetime(target_dates[sorted_rnds[idx_r + 1]][1]).date() - timedelta(days=1)
